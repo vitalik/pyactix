@@ -1,0 +1,20 @@
+[package]
+name = "pyactix"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "pyactix"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.18.1", features = ["extension-module"] }
+pyo3-asyncio = { version="0.18.0" , features = ["attributes", "tokio-runtime"] }
+socket2 = { version = "0.5.1", features = ["all"] }
+tokio = { version = "1.26.0", features = ["full"] }
+actix = "0.13.0"
+actix-web = "4.3.1"
+actix-http = "3.3.1"
+matchit = "0.7.0"
+anyhow = "1.0.72"
