@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use std::sync::Arc;
+use std::time::Instant;
 use std::thread;
 use actix_web::*;
 
@@ -9,7 +10,7 @@ use crate::pyexec::execute_operation;
 
 
 
-async fn request_handler(req: HttpRequest, router: web::Data<Arc<HttpRouter>>) -> impl Responder {
+async fn request_handler(req: &HttpRequest, router: web::Data<Arc<HttpRouter>>) -> impl Responder {
     match router.find(req.method(), req.path()) {
         Ok(op_match) => {
             // println!("operation: {:?}", operation);
@@ -60,16 +61,13 @@ impl Server {
         println!("worker: {:?}", workers);
 
         let raw_socket = socket.try_borrow_mut()?.get_socket();
-        
-        let workers = Arc::new(workers); // Why arc ?
 
 
         let asyncio = py.import("asyncio")?;
         let event_loop = asyncio.call_method0("new_event_loop")?;
         asyncio.call_method1("set_event_loop", (event_loop,))?;
 
-        // let task_locals = pyo3_asyncio::TaskLocals::new(event_loop).copy_context(py)?;
-        // let task_locals_copy = task_locals.clone();
+        let task_locals = pyo3_asyncio::TaskLocals::new(event_loop).copy_context(py)?;
 
         let router = self.router.clone();
 
@@ -79,17 +77,26 @@ impl Server {
                 HttpServer::new(move || {
                     let mut app = App::new();
 
+                    let task_locals = task_locals.clone();
+
                     app = app.app_data(web::Data::new(router.clone()));
 
                     app.default_service(web::route().to(
                         move |router: web::Data<Arc<HttpRouter>>, req: HttpRequest| {
-                            request_handler(req, router)
+
+                            pyo3_asyncio::tokio::scope_local(task_locals.clone(), async move {
+                                let start_time = Instant::now();
+                                let result = request_handler(&req, router).await;
+                                println!("{} {} [{:.6}]", req.method(), req.path(), (Instant::now() - start_time).as_secs_f64());
+                                result
+                            })
+                            
                         })
                     )
                     
                 })
                 //.keep_alive(KeepAlive::Os)
-                .workers(*workers.clone())
+                .workers(workers)
                 .client_request_timeout(std::time::Duration::from_secs(0))
                 .listen(raw_socket.try_into().unwrap())
                 .unwrap()
@@ -100,9 +107,10 @@ impl Server {
         });
 
 
+        println!("Ready. Ctrl+C to stop.");
         let event_loop = (*event_loop).call_method0("run_forever");
         if event_loop.is_err() {
-            println!("Ctrl c handler");
+            println!("\nCtrl c handler");
             // Python::with_gil(|py| {
             //     pyo3_asyncio::tokio::run(py, async move {
             //         execute_event_handler(shutdown_handler, &task_locals.clone())
