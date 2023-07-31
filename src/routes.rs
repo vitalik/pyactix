@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use pyo3::prelude::*;
-use matchit::Router as MatchItRouter;
 use actix_web::http::Method;
+use pyo3::prelude::*;
+use std::collections::HashMap;
+use std::fmt;
 
 #[pyclass]
 #[derive(Debug, Clone)]
@@ -29,65 +29,37 @@ impl OperationInfo {
     }
 }
 
-
-type RouteMap = MatchItRouter<OperationInfo>; // RwLock<>?
+pub type PathOperations = HashMap<Method, OperationInfo>;
 
 pub struct HttpRouter {
-    method_routes: HashMap<Method, RouteMap>,
-}
-
-#[derive(Debug)]
-pub struct MatchedOperation {
-    pub operation: OperationInfo,
-    pub params: HashMap<String, String>,
+    pub operations_paths: HashMap<String, PathOperations>,
+    // TODO: ^ some other structure as we need to keep insert order
 }
 
 impl HttpRouter {
-
-    // TODO: actually better find path first 
-    // and then method - and if path exist and method not - return 405
-
     pub fn new(operations: Vec<OperationInfo>) -> Self {
-
-        let mut method_routes = HashMap::new();
+        let mut operations_paths: HashMap<String, PathOperations> = HashMap::new();
 
         for operation in operations {
             let method = method_str_to_actix(&operation.method);
-            let router = method_routes.entry(method).or_insert_with(|| MatchItRouter::new());
-            router.insert(&operation.path, operation.clone()).unwrap();
+            let path_methods = operations_paths
+                .entry(operation.path.clone())
+                .or_insert_with(|| PathOperations::new());
+            path_methods.insert(method.clone(), operation);
         }
 
         Self {
-            method_routes: method_routes,
+            operations_paths: operations_paths,
         }
     }
+}
 
-
-    pub fn find(&self, method: &Method, path: &str) -> Result<MatchedOperation, String> {
-        let router = self.method_routes.get(method);
-
-        if router.is_none() {
-            return Err(format!("No such method"));
-        }
-
-
-        match router.unwrap().at(path) {
-            Ok(val) => {
-                let mut path_params = HashMap::new();
-                for (key, value) in val.params.iter() {
-                    path_params.insert(key.to_string(), value.to_string());
-                }
-                Ok(MatchedOperation {
-                    operation: val.value.clone(), 
-                    params: path_params
-                })
-            },
-            Err(e) => Err(format!("Not found: {}", e)),
-        }
-
-
+impl fmt::Debug for HttpRouter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Point")
+            .field("len", &self.operations_paths.len())
+            .finish()
     }
-    
 }
 
 fn method_str_to_actix(method: &str) -> Method {

@@ -13,4 +13,6 @@ classifiers = [
 
 
 [tool.maturin]
+python-source = "python"
+module-name = "pyactix._pyactix"
 features = ["pyo3/extension-module"]

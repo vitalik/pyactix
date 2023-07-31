@@ -1,54 +1,69 @@
+use actix_http::KeepAlive;
+use actix_web::*;
 use pyo3::prelude::*;
 use std::sync::Arc;
-use std::time::Instant;
 use std::thread;
-use actix_web::*;
+use std::time::Instant;
 
+use crate::pyexec::{execute_operation, get_traceback};
+use crate::request::Request;
+use crate::routes::{HttpRouter, OperationInfo, PathOperations};
 use crate::shared_socket::SocketHeld;
-use crate::routes::{OperationInfo, HttpRouter};
-use crate::pyexec::execute_operation;
 
+async fn not_found() -> impl Responder {
+    HttpResponse::NotFound()
+        .content_type("application/json")
+        .body("{\"error\": \"not found\"}")
+}
 
+async fn request_handler(req: &HttpRequest, path_methods: &PathOperations) -> impl Responder {
+    let operation = path_methods.get(&req.method());
 
-async fn request_handler(req: &HttpRequest, router: web::Data<Arc<HttpRouter>>) -> impl Responder {
-    match router.find(req.method(), req.path()) {
-        Ok(op_match) => {
-            // println!("operation: {:?}", operation);
-            let output = execute_operation(&op_match.operation, &op_match.params).await.unwrap_or_else(|e| {
+    if operation.is_none() {
+        return format!("method not allowed: {:?}", req.method())
+            .into_bytes()
+            .customize()
+            .insert_header(("content-type", "text/plain"))
+            .with_status(http::StatusCode::METHOD_NOT_ALLOWED);
+    }
 
-                let traceback = get_traceback(&e);
-                println!(
-                    "Error while executing route function for endpoint `{}`: {}",
-                    req.uri().path(),
-                    &traceback
-                );
+    let operation = operation.unwrap();
 
-                traceback
+    let request = Request::from_actix(req);
 
-                //HttpResponse::InternalServerError().body(traceback)
-            });
+    let result = execute_operation(&operation, request).await;
 
-            HttpResponse::Ok().body(output)
-        }, 
-        Err(err) => {
-            println!("err: {:?}", err);
-            HttpResponse::NotFound().body(format!("err: {:?}", err))
+    match result {
+        Ok(output) => output
+            .content
+            .customize()
+            .insert_header(("content-type", "text/plain"))
+            .with_status(http::StatusCode::from_u16(output.status_code).unwrap()),
+        Err(e) => {
+            let traceback = get_traceback(&e);
+            println!("Error at `{}`:\n{}", req.uri().path(), &traceback);
+
+            traceback
+                .into_bytes()
+                .customize()
+                .insert_header(("content-type", "text/plain"))
+                .with_status(http::StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }
 
-
 #[pyclass]
 pub struct Server {
     router: Arc<HttpRouter>,
-
 }
 
 #[pymethods]
 impl Server {
     #[new]
     pub fn new(operations: Vec<OperationInfo>) -> Self {
-        Self { router: Arc::new(HttpRouter::new(operations)) }
+        Self {
+            router: Arc::new(HttpRouter::new(operations)),
+        }
     }
 
     pub fn start(
@@ -62,7 +77,6 @@ impl Server {
 
         let raw_socket = socket.try_borrow_mut()?.get_socket();
 
-
         let asyncio = py.import("asyncio")?;
         let event_loop = asyncio.call_method0("new_event_loop")?;
         asyncio.call_method1("set_event_loop", (event_loop,))?;
@@ -73,27 +87,33 @@ impl Server {
 
         thread::spawn(move || {
             actix_web::rt::System::new().block_on(async move {
-
                 HttpServer::new(move || {
                     let mut app = App::new();
 
-                    let task_locals = task_locals.clone();
+                    for path in router.operations_paths.keys() {
+                        let task_locals = task_locals.clone();
+                        let path_methods = router.operations_paths.get(path).unwrap().clone();
 
-                    app = app.app_data(web::Data::new(router.clone()));
+                        app =
+                            app.service(web::resource(path.clone()).to(move |req: HttpRequest| {
+                                let path_methods = path_methods.clone(); // TODO: how to avoid clone?
+                                pyo3_asyncio::tokio::scope_local(task_locals.clone(), async move {
+                                    let start_time = Instant::now();
+                                    let result = request_handler(&req, &path_methods).await;
+                                    println!(
+                                        "{} {} [{:.6}]",
+                                        req.method(),
+                                        req.path(),
+                                        (Instant::now() - start_time).as_secs_f64()
+                                    );
+                                    result
+                                })
+                            }));
+                    }
 
-                    app.default_service(web::route().to(
-                        move |router: web::Data<Arc<HttpRouter>>, req: HttpRequest| {
+                    app = app.default_service(web::route().to(not_found));
 
-                            pyo3_asyncio::tokio::scope_local(task_locals.clone(), async move {
-                                let start_time = Instant::now();
-                                let result = request_handler(&req, router).await;
-                                println!("{} {} [{:.6}]", req.method(), req.path(), (Instant::now() - start_time).as_secs_f64());
-                                result
-                            })
-                            
-                        })
-                    )
-                    
+                    app
                 })
                 //.keep_alive(KeepAlive::Os)
                 .workers(workers)
@@ -105,7 +125,6 @@ impl Server {
                 .unwrap();
             });
         });
-
 
         println!("Ready. Ctrl+C to stop.");
         let event_loop = (*event_loop).call_method0("run_forever");
@@ -125,22 +144,4 @@ impl Server {
 
         Ok(())
     }
-
-
 }
-
-
-fn get_traceback(error: &PyErr) -> String {
-    Python::with_gil(|py| -> String {
-        if let Some(traceback) = error.traceback(py) {
-            let msg = match traceback.format() {
-                Ok(msg) => format!("\n{msg} {error}"),
-                Err(e) => e.to_string(),
-            };
-            return msg;
-        };
-
-        error.value(py).to_string()
-    })
-}
-

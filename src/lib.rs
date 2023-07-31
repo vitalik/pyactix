@@ -1,16 +1,17 @@
 use pyo3::prelude::*;
 
-
-mod server;
-mod routes;
-mod shared_socket;
 mod pyexec;
+mod request;
+mod response;
+mod routes;
+mod server;
+mod shared_socket;
 
-use server::Server;
+use request::Request;
+use response::Response;
 use routes::OperationInfo;
+use server::Server;
 use shared_socket::SocketHeld;
-
-
 
 #[pyfunction]
 fn get_version() -> String {
@@ -19,10 +20,12 @@ fn get_version() -> String {
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn pyactix(_py: Python, m: &PyModule) -> PyResult<()> {
+fn _pyactix(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_version, m)?)?;
     m.add_class::<OperationInfo>()?;
     m.add_class::<Server>()?;
     m.add_class::<SocketHeld>()?;
+    m.add_class::<Request>()?;
+    m.add_class::<Response>()?;
     Ok(())
 }
